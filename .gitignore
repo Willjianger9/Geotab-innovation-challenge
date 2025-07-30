@@ -3,6 +3,9 @@
 
 # Mac system files
 .DS_Store
+**/.DS_Store
+._.DS_Store
+**/._.DS_Store
 
 # Ignore everything in data directory except .gitkeep
 /data/*
