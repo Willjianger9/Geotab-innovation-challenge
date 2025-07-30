@@ -2,7 +2,56 @@
 
 This project contains scripts to help you automate the process of cleaning up and uploading Word documents (`.docx` files) to Atlassian Confluence, preserving folder structure and creating a navigable hierarchy of pages.
 
-## Overview
+# Setup
+
+## Step 1: Download from Google Drive
+
+First, you need to download the folder from Google Drive:
+
+1. Navigate to your Google Drive folder containing the documents
+2. Right-click on the folder and select "Download" 
+   ![Google Drive Download Option](images/GoogleDriveDownload1.png)
+3. Wait for Google Drive to prepare and download your files as a ZIP archive
+   ![Google Drive Download Progress](images/GoogleDriveDownloadingzip.png)
+
+## Step 2: Prepare the Local Data Directory
+
+1. Create a `data` directory in the root of this project if it doesn't exist already
+   ```bash
+   mkdir -p data
+   ```
+
+2. Move the downloaded ZIP file to the project's root directory
+
+3. Extract the contents of the ZIP file into the data directory:
+   ```bash
+   unzip downloaded-folder.zip -d data/
+   ```
+   
+4. Clean up by removing the ZIP file:
+   ```bash
+   rm downloaded-folder.zip
+   ```
+
+Your directory structure should now look like this:
+
+```
+/project-root
+├── README.md
+├── upload_to_confluence.py
+├── delete_non_docx.py
+├── .env.sample
+├── .env (your configuration file)
+└── data/
+    ├── base_folder/
+        ├── document1.docx
+        ├── document2.docx
+        └── any_additional_subfolder/
+            ├── document3.docx
+            └── document4.docx
+```
+
+## Scripts Overview
 
 The project consists of two main scripts:
 
