@@ -1,3 +1,9 @@
+# Environment variables
 .env
-/data/*
+
+# Mac system files
 .DS_Store
+
+# Ignore everything in data directory except .gitkeep
+/data/*
+!/data/.gitkeep
