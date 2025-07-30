@@ -1,4 +1,4 @@
-# Confluence DOCX Upload Automation
+# Google Drive to Confluence Migration Automation
 
 This project contains scripts to help you automate the process of cleaning up and uploading Word documents (`.docx` files) to Atlassian Confluence, preserving folder structure and creating a navigable hierarchy of pages.
 
@@ -92,6 +92,11 @@ python3 upload_to_confluence.py
 - **Folder Structure Preservation**: Creates a matching folder hierarchy in Confluence
 - **DOCX to Native Pages**: Converts `.docx` content to HTML and displays it in Confluence pages
 - **Attachment Upload**: Uploads original `.docx` files as attachments for reference
+- **Permission Control**: Dynamically sets page permissions based on filename suffixes:
+  - `[INT]` - Internal access (organization members only) - this is the default
+  - `[PUB]` - Organization members only access (same as `[INT]`)
+  - `[RES]` - Restricted access (owner only)
+  - Example: `Software Development Mock Doc 1 [INT].docx`
 - **Folder Navigation**: Creates folder pages with separate sections for:
   - "This folder contains the following folders:" - Links to immediate subfolders
   - "This folder contains the following pages:" - Links to immediate document pages

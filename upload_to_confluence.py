@@ -34,6 +34,17 @@ SPACE_KEY = os.getenv('SPACE_KEY')
 ROOT_PAGE_ID = os.getenv('ROOT_PAGE_ID')
 SPACE_ID = None  # Will be set after retrieving numeric ID
 
+# Get organization-wide group from config for internal permissions
+ORG_GROUP = os.getenv('ORG_GROUP', 'confluence-users')  # Default group for [INT] permissions
+
+# Permission configuration - these will be detected from filenames
+# [INT] = Internal (organization-wide)
+# [PUB] = Public (anyone with link)
+# [RES] = Restricted (owner/explicitly shared)
+INTERNAL_SUFFIX = '[INT]'
+PUBLIC_SUFFIX = '[PUB]'
+RESTRICTED_SUFFIX = '[RES]'
+
 # Ensure trailing slash for base URL
 if CONFLUENCE_BASE_URL and not CONFLUENCE_BASE_URL.endswith('/'):
     CONFLUENCE_BASE_URL += '/'
@@ -283,8 +294,13 @@ def upload_docx_as_page(file_path, parent_id=None, space_id=None):
     if space_id is None:
         space_id = SPACE_ID
         
-    # Get the file name without extension as the page title
+    # Get the file name and detect permission level
     file_name = os.path.basename(file_path)
+    
+    # Detect permission level from filename suffix
+    permission_level, group_name = get_permission_level_from_filename(file_name)
+    
+    # Get title, keeping permission suffix if present
     page_title = os.path.splitext(file_name)[0]
     
     # Check if a page with this title already exists
@@ -294,8 +310,9 @@ def upload_docx_as_page(file_path, parent_id=None, space_id=None):
         print(f"Page with title '{page_title}' already exists with ID {existing_page_id}")
         print(f"Updating existing page content instead of creating a new one")
         
-        # Update the existing page content
-        return update_page_content(existing_page_id, page_title, convert_docx_to_html(file_path))
+        # Update the existing page content with the detected permissions
+        return update_page_content(existing_page_id, page_title, convert_docx_to_html(file_path), 
+                              permission_level, group_name)
     
     # Convert DOCX to HTML
     html_content = convert_docx_to_html(file_path)
@@ -329,8 +346,18 @@ def upload_docx_as_page(file_path, parent_id=None, space_id=None):
         page_data = response.json()
         print(f"Successfully created page '{page_title}' with ID {page_data['id']}")
         
-        # Also upload the original file as an attachment
-        upload_attachment_to_page(file_path, page_data['id'])
+        # Upload the original document as an attachment
+        if upload_attachment_to_page(file_path, page_data['id']):
+            print(f"Uploaded original document as attachment to page: {page_title}")
+        else:
+            print(f"Failed to upload original document as attachment to page: {page_title}")
+        
+        # Apply permissions based on detected level from filename
+        if permission_level:
+            if apply_permissions_by_level(page_data['id'], page_title, permission_level, group_name):
+                print(f"Applied {permission_level} permissions to page: {page_title}")
+            else:
+                print(f"Failed to apply {permission_level} permissions to page: {page_title}")
         
         return page_data["id"]
     except requests.exceptions.RequestException as e:
@@ -339,6 +366,484 @@ def upload_docx_as_page(file_path, parent_id=None, space_id=None):
             print(f"Response: {e.response.text}")
         return None
         
+def get_permission_level_from_filename(file_name):
+    """
+    Determine the permission level based on file name suffix.
+    
+    Args:
+        file_name (str): Name of the file to check
+    
+    Returns:
+        tuple: (permission_type, group_name) where permission_type is one of:
+               'public', 'internal', 'restricted', or None if no suffix found
+    """
+    # Default to None (no restrictions)
+    permission_level = None
+    group_name = None
+    
+    # Check for each suffix
+    if file_name.endswith(INTERNAL_SUFFIX + '.docx'):
+        permission_level = 'internal'
+        group_name = ORG_GROUP
+    elif file_name.endswith(PUBLIC_SUFFIX + '.docx'):
+        permission_level = 'public'
+        # No group needed for public
+        group_name = None
+    elif file_name.endswith(RESTRICTED_SUFFIX + '.docx'):
+        permission_level = 'restricted'
+        # Will use the default space permissions
+        # Could be enhanced later to use specific groups
+        group_name = None
+    
+    return (permission_level, group_name)
+
+def check_group_exists(group_name):
+    """
+    Check if a group exists in Confluence
+    
+    Args:
+        group_name (str): Name of the group to check
+        
+    Returns:
+        bool: True if the group exists, False otherwise
+    """
+    if not group_name:
+        return False
+        
+    # First try the v2 API
+    v2_url = f"{CONFLUENCE_BASE_URL}wiki/api/v2/groups/{quote(group_name)}"
+    headers = get_auth_header()
+    
+    try:
+        print(f"Checking if group exists: '{group_name}' using URL: {v2_url}")
+        v2_response = requests.get(v2_url, headers=headers)
+        
+        if v2_response.status_code == 200:
+            print(f"Group '{group_name}' found using v2 API")
+            return True
+        else:
+            print(f"Group '{group_name}' not found using v2 API (status: {v2_response.status_code})")
+            print(f"Response: {v2_response.text}")
+            
+            # Fallback to v1 API
+            v1_url = f"{CONFLUENCE_BASE_URL}wiki/rest/api/group/{quote(group_name)}"
+            print(f"Trying v1 API URL: {v1_url}")
+            v1_response = requests.get(v1_url, headers=headers)
+            
+            if v1_response.status_code == 200:
+                print(f"Group '{group_name}' found using v1 API")
+                return True
+            else:
+                print(f"Group '{group_name}' not found using v1 API (status: {v1_response.status_code})")
+                print(f"Response: {v1_response.text}")
+                
+                # Try user search API to see if the group might be visible there
+                search_url = f"{CONFLUENCE_BASE_URL}wiki/rest/api/search?cql=type=group AND title~\"{group_name}\""
+                print(f"Trying search API: {search_url}")
+                search_response = requests.get(search_url, headers=headers)
+                
+                if search_response.status_code == 200:
+                    results = search_response.json().get("results", [])
+                    if results:
+                        print(f"Found similar groups via search: {[r.get('title') for r in results]}")
+                    else:
+                        print(f"No similar groups found via search")
+                
+                return False
+    except requests.exceptions.RequestException as e:
+        print(f"Error checking if group exists: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            print(f"Response: {e.response.text}")
+        return False
+
+def apply_permissions_by_level(page_id, title, permission_level, group_name=None):
+    """
+    Apply appropriate permissions based on the determined level.
+    
+    Args:
+        page_id (str): ID of the page to set permissions on
+        title (str): Title of the page (for logging)
+        permission_level (str): One of 'public', 'internal', 'restricted', or None
+        group_name (str, optional): Not used since internal is default
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    if not permission_level or permission_level == 'internal' or permission_level == 'public':
+        # Both internal and public documents are restricted to organization members only
+        # This is the default in this Confluence instance - no need to change anything
+        print(f"Using default organization-only permissions for '{title}'")
+        return True
+            
+    elif permission_level == 'restricted':
+        # For restricted documents, we need to set owner-only access
+        try:
+            print(f"Setting '{title}' as restricted (accessible only to owner)")
+            
+            # First, we need to get the account ID of the current user
+            # This is necessary because Atlassian Cloud APIs require accountId instead of username
+            current_user_url = f"{CONFLUENCE_BASE_URL}wiki/rest/api/user/current"
+            headers = get_auth_header()
+            
+            user_response = requests.get(current_user_url, headers=headers)
+            if user_response.status_code != 200:
+                print(f"Failed to get current user info: {user_response.status_code}")
+                print(f"Response: {user_response.text}")
+                return False
+                
+            user_data = user_response.json()
+            account_id = user_data.get('accountId')
+            
+            if not account_id:
+                print("Failed to get account ID for current user")
+                return False
+                
+            print(f"Retrieved account ID: {account_id} for current user")
+            
+            # PUT request to replace all existing restrictions
+            url = f"{CONFLUENCE_BASE_URL}wiki/rest/api/content/{page_id}/restriction"
+            headers["Content-Type"] = "application/json"
+            
+            # Define the payload for both read and update restrictions
+            # Using accountId instead of username
+            payload = [
+                {
+                    "operation": "read",
+                    "restrictions": {
+                        "user": [
+                            {
+                                "type": "known",
+                                "accountId": account_id
+                            }
+                        ]
+                    }
+                },
+                {
+                    "operation": "update",
+                    "restrictions": {
+                        "user": [
+                            {
+                                "type": "known",
+                                "accountId": account_id
+                            }
+                        ]
+                    }
+                }
+            ]
+            
+            response = requests.put(url, headers=headers, data=json.dumps(payload))
+            
+            if response.status_code >= 200 and response.status_code < 300:
+                print(f"Successfully set restricted permissions for '{title}'")
+                return True
+            else:
+                print(f"Failed to set restricted permissions for '{title}': {response.status_code}")
+                print(f"Response: {response.text}")
+                return False
+        except Exception as e:
+            print(f"Error setting restricted permissions for '{title}': {e}")
+            return False
+            
+    return False  # Should never get here
+        
+    return False
+
+def set_page_restrictions(page_id, restriction_type, group_name):
+    """
+    Set restrictions on a Confluence page for a specific group.
+    
+    Args:
+        page_id (str): ID of the page to restrict
+        restriction_type (str): Type of restriction ('read' or 'update')
+        group_name (str): Name of the group to grant access to
+        
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    if not (page_id and restriction_type and group_name):
+        print(f"Skipping restrictions for page {page_id} (missing parameters)")
+        return False
+    
+    try:
+        headers = get_auth_header()
+        headers["Content-Type"] = "application/json"
+        
+        # Try the v2 API first (most reliable in newer Confluence Cloud)
+        v2_url = f"{CONFLUENCE_BASE_URL}wiki/api/v2/pages/{page_id}/permissions"  # Updated URL pattern for v2 API
+        v2_payload = {
+            "operationType": "addPermission",
+            "subject": {
+                "type": "group",
+                "identifier": group_name
+            },
+            "operation": {
+                "key": restriction_type,
+                "targetType": "page"  # Updated to specify 'page' instead of generic 'content'
+            }
+        }
+        
+        print(f"Attempting v2 API permission call to URL: {v2_url}")
+        print(f"Payload: {json.dumps(v2_payload)}")
+        v2_response = requests.post(v2_url, headers=headers, json=v2_payload)
+        print(f"V2 API response status: {v2_response.status_code}")
+        print(f"V2 API response: {v2_response.text}")
+        
+        if v2_response.status_code >= 200 and v2_response.status_code < 300:
+            print(f"Successfully restricted {restriction_type} access on page {page_id} to group '{group_name}' using v2 API")
+            return True
+        else:
+            print(f"V2 API failed with status {v2_response.status_code}, trying v1 API...")
+            
+            # Try the v1 API next
+            v1_url = f"{CONFLUENCE_BASE_URL}wiki/rest/api/content/{page_id}/restriction/{restriction_type}"
+            
+            # Create the restriction payload for v1 API
+            v1_payload = {
+                "user": [],
+                "group": [
+                    group_name
+                ]
+            }
+            
+            # Create the new restriction
+            v1_response = requests.post(v1_url, headers=headers, json=v1_payload)
+            
+            # Check status code directly - some Confluence instances return non-standard codes
+            if v1_response.status_code >= 200 and v1_response.status_code < 300:
+                print(f"Successfully restricted {restriction_type} access on page {page_id} to group '{group_name}' using v1 API")
+                return True
+            else:
+                # If both v2 and v1 failed, try the experimental API as last resort
+                print(f"V1 API also failed, trying experimental API...")
+                
+                # Experimental endpoint for setting permissions
+                exp_url = f"{CONFLUENCE_BASE_URL}wiki/rest/experimental/content/{page_id}/restriction"
+                
+                exp_payload = {
+                    "restrictions": {
+                        restriction_type: {
+                            "group": [group_name]
+                        }
+                    }
+                }
+                
+                exp_response = requests.put(exp_url, headers=headers, json=exp_payload)
+                if exp_response.status_code >= 200 and exp_response.status_code < 300:
+                    print(f"Successfully restricted {restriction_type} access on page {page_id} using experimental API")
+                    return True
+                else:
+                    print(f"All permission APIs failed. Last error: {exp_response.status_code} {exp_response.reason}")
+                    if exp_response.text:
+                        print(f"Response: {exp_response.text}")
+                    return False
+        
+    except requests.exceptions.RequestException as e:
+        print(f"Error setting page restrictions: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            print(f"Response: {e.response.text}")
+        return False
+
+def remove_all_restrictions(page_id):
+    """
+    Remove all restrictions from a page to make it accessible to everyone with space access.
+    
+    Args:
+        page_id (str): ID of the page to remove restrictions from
+        
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    if not page_id:
+        print("Cannot remove restrictions (missing page ID)")
+        return False
+        
+    try:
+        headers = get_auth_header()
+        headers["Content-Type"] = "application/json"
+        
+        # First try the standard API endpoint for restriction deletion
+        for restriction_type in ["read", "update"]:
+            url = f"{CONFLUENCE_BASE_URL}wiki/rest/api/content/{page_id}/restriction/{restriction_type}"
+            
+            # Get current restrictions to see if any exist
+            get_response = requests.get(url, headers=headers)
+            if get_response.status_code >= 200 and get_response.status_code < 300:
+                restrictions_data = get_response.json()
+                if "results" in restrictions_data and len(restrictions_data["results"]) > 0:
+                    # Restrictions exist, delete them
+                    delete_response = requests.delete(url, headers=headers)
+                    if delete_response.status_code < 200 or delete_response.status_code >= 300:
+                        print(f"Failed to remove {restriction_type} restrictions: {delete_response.status_code} {delete_response.reason}")
+                        # Try the experimental API as fallback
+                        exp_url = f"{CONFLUENCE_BASE_URL}wiki/rest/experimental/content/{page_id}/restriction"
+                        exp_payload = {"restrictions": {restriction_type: {"user": [], "group": []}}}
+                        exp_response = requests.put(exp_url, headers=headers, json=exp_payload)
+                        if exp_response.status_code < 200 or exp_response.status_code >= 300:
+                            print(f"Failed to remove {restriction_type} restrictions with experimental API: {exp_response.status_code}")
+                            return False
+        
+        print(f"Successfully removed all restrictions from page {page_id}")
+        return True
+    except requests.exceptions.RequestException as e:
+        print(f"Error removing page restrictions: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            print(f"Response: {e.response.text}")
+        return False
+
+def enable_anonymous_access(page_id):
+    """
+    Enable anonymous access to a page if the Confluence instance supports it.
+    This makes the page truly public (anyone with link can access).
+    
+    Args:
+        page_id (str): ID of the page to enable anonymous access for
+        
+    Returns:
+        bool: True if successful, False if failed, None if API not supported
+    """
+    if not page_id:
+        print("Cannot enable anonymous access (missing page ID)")
+        return False
+        
+    try:
+        headers = get_auth_header()
+        headers["Content-Type"] = "application/json"
+        
+        # Try to use the space permissions API to check if anonymous access is possible
+        # First we need to get the page details to find the space key/id
+        page_url = f"{CONFLUENCE_BASE_URL}wiki/rest/api/content/{page_id}?expand=space"
+        page_response = requests.get(page_url, headers=headers)
+        
+        if page_response.status_code >= 200 and page_response.status_code < 300:
+            page_data = page_response.json()
+            space_key = page_data.get("space", {}).get("key")
+            
+            if space_key:
+                # Try to enable anonymous access at the page-level instead
+                # Use the REST API v2 to make the content publicly accessible
+                content_perm_url = f"{CONFLUENCE_BASE_URL}wiki/api/v2/content/{page_id}/permissions"
+                content_perm_payload = {
+                    "operationType": "addPermission",
+                    "subject": {
+                        "type": "anonymous"
+                    },
+                    "operation": {
+                        "key": "read",
+                        "targetType": "content"
+                    }
+                }
+                
+                content_perm_response = requests.post(content_perm_url, headers=headers, json=content_perm_payload)
+                
+                if content_perm_response.status_code >= 200 and content_perm_response.status_code < 300:
+                    print(f"Successfully enabled anonymous access for page {page_id}")
+                    return True
+                else:
+                    # If the v2 API fails, fall back to the space property approach
+                    print(f"V2 permission API failed, falling back to space property method")
+                    
+                    # Try the space property API
+                    anon_url = f"{CONFLUENCE_BASE_URL}wiki/rest/api/space/{space_key}/property/anonymous-access"
+                    
+                    # First check if property exists
+                    check_response = requests.get(anon_url, headers=headers)
+                    
+                    if check_response.status_code == 200:
+                        # Property exists, need to include version in update
+                        property_data = check_response.json()
+                        version = property_data.get("version", {}).get("number", 0)
+                        
+                        # Update existing property with version
+                        anon_payload = {
+                            "value": "true",
+                            "version": {"number": version + 1}  # Increment version
+                        }
+                        anon_response = requests.put(anon_url, headers=headers, json=anon_payload)
+                    elif check_response.status_code == 404:
+                        # Create new property
+                        anon_payload = {"value": "true", "key": "anonymous-access"}
+                        anon_response = requests.post(anon_url, headers=headers, json=anon_payload)
+                    else:
+                        print(f"Unexpected status checking anonymous property: {check_response.status_code}")
+                        return None
+                        
+                    if anon_response.status_code >= 200 and anon_response.status_code < 300:
+                        print(f"Successfully enabled anonymous access for page in space {space_key}")
+                        return True
+                    else:
+                        print(f"Failed to enable anonymous access: {anon_response.status_code}")
+                        if anon_response.text:
+                            print(f"Response: {anon_response.text}")
+                        return False
+            else:
+                print(f"Could not determine space key for page {page_id}")
+                return False
+        else:
+            print(f"Failed to get page details: {page_response.status_code}")
+            return False
+    except requests.exceptions.RequestException as e:
+        print(f"Error enabling anonymous access: {e}")
+        # If we get here, the API endpoint likely doesn't exist
+        return None
+
+def set_restricted_permissions(page_id):
+    """
+    Set restricted permissions on a page (owner only + explicit shares).
+    
+    Args:
+        page_id (str): ID of the page to restrict
+        
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    if not page_id:
+        print("Cannot set restricted permissions (missing page ID)")
+        return False
+        
+    try:
+        headers = get_auth_header()
+        headers["Content-Type"] = "application/json"
+        
+        # Get the current user details to set owner-only permissions
+        # Use the global USERNAME from environment variables instead of trying to fetch current user
+        if USERNAME:
+            # Set both read and update restrictions to the current user (owner)
+            for restriction_type in ["read", "update"]:
+                url = f"{CONFLUENCE_BASE_URL}wiki/rest/api/content/{page_id}/restriction/{restriction_type}"
+                
+                # Create payload with just the owner as allowed user
+                payload = {
+                    "user": [USERNAME],  # Use the configured username
+                    "group": []
+                }
+                
+                response = requests.post(url, headers=headers, json=payload)
+                
+                if response.status_code < 200 or response.status_code >= 300:
+                    print(f"Failed to set {restriction_type} restriction to owner-only: {response.status_code}")
+                    
+                    # Try experimental API as fallback
+                    exp_url = f"{CONFLUENCE_BASE_URL}wiki/rest/experimental/content/{page_id}/restriction"
+                    exp_payload = {"restrictions": {restriction_type: {"user": [USERNAME], "group": []}}}
+                    
+                    exp_response = requests.put(exp_url, headers=headers, json=exp_payload)
+                    if exp_response.status_code < 200 or exp_response.status_code >= 300:
+                        print(f"Failed to set {restriction_type} restriction with experimental API: {exp_response.status_code}")
+                        if exp_response.text:
+                            print(f"Response: {exp_response.text}")
+                        return False
+            
+            print(f"Successfully set restricted (owner-only) permissions for page {page_id}")
+            return True
+        else:
+            print(f"Error: USERNAME not set in environment variables. Cannot set restricted permissions.")
+            return False
+    except requests.exceptions.RequestException as e:
+        print(f"Error setting restricted permissions: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            print(f"Response: {e.response.text}")
+        return False
+
 def upload_attachment_to_page(file_path, page_id):
     """
     Upload a file as an attachment to a Confluence page.
@@ -401,17 +906,19 @@ def get_page_info(page_id):
             print(f"Response: {e.response.text}")
         return None
 
-def update_page_content(page_id, title, html_content):
+def update_page_content(page_id, title, html_content, permission_level=None, group_name=None):
     """
-    Update an existing page's content in Confluence.
+    Update an existing Confluence page with new content.
     
     Args:
         page_id (str): ID of the page to update
         title (str): Title of the page
-        html_content (str): HTML content to set on the page
-        
+        html_content (str): HTML content to update the page with
+        permission_level (str, optional): Permission level to apply
+        group_name (str, optional): Group name for internal permission level
+    
     Returns:
-        str: ID of the updated page, or None if failed
+        str: Page ID if successful, None otherwise
     """
     # First get the current page info to get version number
     page_info = get_page_info(page_id)
@@ -450,6 +957,14 @@ def update_page_content(page_id, title, html_content):
         response = requests.put(url, headers=headers, json=data)
         response.raise_for_status()
         print(f"Successfully updated page content for '{title}' with ID {page_id}")
+        
+        # Apply permissions based on detected level from filename
+        if permission_level:
+            if apply_permissions_by_level(page_id, title, permission_level, group_name):
+                print(f"Applied {permission_level} permissions to updated page: {title}")
+            else:
+                print(f"Failed to apply {permission_level} permissions to updated page: {title}")
+                
         return page_id
     except requests.exceptions.RequestException as e:
         print(f"Error updating page '{title}': {e}")
