@@ -2,6 +2,15 @@
 
 This project contains scripts to help you automate the process of cleaning up and uploading Word documents (`.docx` files) to Atlassian Confluence, preserving folder structure and creating a navigable hierarchy of pages.
 
+# Demo
+
+<video width="640" height="360" controls>
+  <source src="DemoVideo.mp4" type="video/mp4">
+  Your browser does not support the video tag.
+</video>
+
+*If the video above doesn't play, you can [download the demo video directly](DemoVideo.mp4)*
+
 # Setup
 
 ## Step 1: Download from Google Drive
