@@ -4,10 +4,7 @@ This project contains scripts to help you automate the process of cleaning up an
 
 # Demo
 
-<video width="640" height="360" controls>
-  <source src="DemoVideo.mp4" type="video/mp4">
-  Your browser does not support the video tag.
-</video>
+https://github.com/user-attachments/assets/4e21d5a1-1ff8-423e-b0d7-a03ee7530362
 
 *If the video above doesn't play, you can [download the demo video directly](DemoVideo.mp4)*
 
